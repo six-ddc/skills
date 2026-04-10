@@ -38,7 +38,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     p.add_argument("input_file", help="Input file path (.csv or .jsonl)")
     p.add_argument("--prompt", required=True,
-                    help="Prompt template, use {col} for input columns, {_index} etc. for context")
+                    help="Prompt template string, or path to a .txt/.md file containing the template. "
+                         "Use {col} for input columns, {_index} etc. for context")
     p.add_argument("--output", required=True,
                     help="Output file path (format detected by extension)")
     p.add_argument("--output-map", nargs="*", default=[], metavar="COL={PLACEHOLDER}",
@@ -218,11 +219,18 @@ def render_prompt(template: str, row: dict, index: int, work_dir: str, input_fil
         if key in builtins:
             return builtins[key]
         if key in row:
-            return str(row[key])
-        raise KeyError(
-            f"Placeholder '{{{key}}}' cannot be resolved. "
-            f"Available columns: {list(row.keys())}, builtins: {list(builtins.keys())}"
-        )
+            val = row[key]
+            # Serialize complex types so nested objects render as JSON
+            if isinstance(val, (dict, list)):
+                return json.dumps(val, ensure_ascii=False)
+            return str(val)
+        # Dot-path traversal for nested JSONL fields (e.g. {user.name})
+        dot_val = resolve_dot_path(row, key)
+        if dot_val is not None:
+            if isinstance(dot_val, (dict, list)):
+                return json.dumps(dot_val, ensure_ascii=False)
+            return str(dot_val)
+        return match.group(0)  # unrecognized placeholder, keep as-is
 
     return re.sub(r"\{([^}]+)\}", replacer, template)
 
@@ -272,7 +280,7 @@ async def call_claude(
     max_retries: int = 0,
 ) -> dict:
     """Call claude -p and return the parsed JSON dict. Retries on recoverable errors."""
-    cmd = ["claude", "-p", prompt, "--output-format", "json", "--no-session-persistence"]
+    cmd = ["claude", "-p", prompt, "--output-format", "json", "--no-session-persistence", "--dangerously-skip-permissions"]
     cmd += passthrough_args
 
     for attempt in range(max_retries + 1):
@@ -286,6 +294,10 @@ async def call_claude(
 
         stdout_text = stdout.decode().strip()
         stderr_text = stderr.decode().strip()
+
+        # Forward subprocess stderr so the user sees startup errors, auth failures, etc.
+        if stderr_text:
+            print(stderr_text, file=sys.stderr)
 
         # Try parsing stdout JSON first (claude outputs JSON even on non-zero exit)
         try:
@@ -366,6 +378,16 @@ def load_checkpoint(output_path: str, fmt: str) -> set[int]:
 # Output writing
 # ---------------------------------------------------------------------------
 
+def _read_csv_header(path: str) -> list[str] | None:
+    """Read the header row from an existing CSV file. Returns None if unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            reader = csv.reader(f)
+            return next(reader, None)
+    except Exception:
+        return None
+
+
 class OutputWriter:
     """Incremental writer supporting CSV and JSONL. Thread-safe via asyncio.Lock."""
 
@@ -376,6 +398,16 @@ class OutputWriter:
         self.lock = asyncio.Lock()
 
         if append and os.path.exists(path):
+            # Validate CSV header consistency on resume
+            if fmt == "csv":
+                existing = _read_csv_header(path)
+                if existing is not None and existing != fieldnames:
+                    raise ValueError(
+                        f"Output map changed since last run.\n"
+                        f"  Existing header: {existing}\n"
+                        f"  Current header:  {fieldnames}\n"
+                        f"Delete the output file to restart, or use the same --output-map."
+                    )
             self.file = open(path, "a", newline="", encoding="utf-8")
             self._needs_header = False
         else:
@@ -501,8 +533,11 @@ async def process_row(
         await writer.write_row(output_row)
         await stats.record(cost, not is_error)
 
-        status = "ERR" if is_error else "OK"
-        print(f"[row {idx}] {status} | {stats.progress_line()}", file=sys.stderr)
+        if is_error:
+            err_msg = claude_json.get("result", "unknown error")
+            print(f"[row {idx}] ERR | {stats.progress_line()}\n  Error: {err_msg}", file=sys.stderr)
+        else:
+            print(f"[row {idx}] OK | {stats.progress_line()}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +578,7 @@ def dry_run(
 
     print()
     print("Example command:")
-    cmd = ["claude", "-p", "<prompt>", "--output-format", "json", "--no-session-persistence"]
+    cmd = ["claude", "-p", "<prompt>", "--output-format", "json", "--no-session-persistence", "--dangerously-skip-permissions"]
     cmd += passthrough_args
     print(f"  {' '.join(cmd)}")
     if args.work_dir:
@@ -554,9 +589,25 @@ def dry_run(
 # Main
 # ---------------------------------------------------------------------------
 
+def resolve_prompt(prompt_arg: str) -> str:
+    """If prompt_arg looks like a file path and the file exists, read its content; otherwise return as-is."""
+    # Quick reject: real prompts almost always contain spaces/newlines/placeholders
+    if "\n" in prompt_arg or len(prompt_arg) > 500:
+        return prompt_arg
+    p = Path(prompt_arg)
+    if p.suffix.lower() in (".txt", ".md", ".prompt") and p.is_file():
+        content = p.read_text(encoding="utf-8").strip()
+        print(f"Prompt loaded from file: {prompt_arg} ({len(content)} chars)", file=sys.stderr)
+        return content
+    return prompt_arg
+
+
 async def main():
     args, passthrough_args = parse_args()
     work_dir = args.work_dir or os.getcwd()
+
+    # Resolve prompt (inline string or file path)
+    args.prompt = resolve_prompt(args.prompt)
 
     # Detect formats
     input_fmt = detect_format(args.input_file)
