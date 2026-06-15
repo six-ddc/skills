@@ -25,41 +25,71 @@ import os
 import re
 import sys
 import uuid
+from html import unescape
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _common import build_cli, em_get, norm_ticker, output, UA
+import requests
+
+from _common import build_cli, em_get, market_symbol, norm_ticker, output, UA, response_json
 
 
 def eastmoney_stock_news(code: str, page_size: int = 20) -> list[dict]:
     """东财个股新闻（JSONP 接口）。
     返回: [{title, content, time, source, url}]
     """
-    # 构造 JSONP 参数
+    keywords = [norm_ticker(code)]
+    try:
+        from quotes import tencent_quote
+        q = tencent_quote([code])
+        if q and q[0].get("name"):
+            keywords.extend([q[0]["name"], f"{norm_ticker(code)} {q[0]['name']}"])
+    except Exception:
+        pass
+    if str(code).strip() not in keywords:
+        keywords.append(str(code).strip())
+
+    rows = []
+    seen = set()
+    for keyword in dict.fromkeys(k for k in keywords if k):
+        for type_name in ("cmsArticleWebOld", "cmsArticleWeb"):
+            for item in _search_stock_news(keyword, type_name, page_size):
+                key = item.get("url") or f"{item.get('title')}|{item.get('time')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(item)
+                if len(rows) >= page_size:
+                    return rows
+    return rows or sina_stock_news(code, page_size)
+
+
+def _search_stock_news(keyword: str, type_name: str, page_size: int) -> list[dict]:
     cb = "jQuery_news"
     url = "https://search-api-web.eastmoney.com/search/jsonp"
     inner_params = json.dumps({
         "uid": "",
-        "keyword": norm_ticker(code),
-        "type": ["cmsArticleWebOld"],
+        "keyword": keyword,
+        "type": [type_name],
         "client": "web",
         "clientType": "web",
         "clientVersion": "curr",
-        "param": {"cmsArticleWebOld": {"searchScope": "default", "sort": "default",
+        "param": {type_name: {"searchScope": "default", "sort": "default",
                   "pageIndex": 1, "pageSize": page_size, "preTag": "", "postTag": ""}},
     }, separators=(',', ':'))
     params = {"cb": cb, "param": inner_params}
     headers = {"User-Agent": UA, "Referer": "https://so.eastmoney.com/"}
-    r = em_get(url, params=params, headers=headers, timeout=15)
-
-    # 解析 JSONP
-    text = r.text
-    json_str = text[text.index("(") + 1 : text.rindex(")")]
-    d = json.loads(json_str)
-
+    try:
+        r = em_get(url, params=params, headers=headers, timeout=15)
+        d = response_json(r)
+    except Exception as e:
+        print(f"[WARN] 东财个股新闻搜索失败 keyword={keyword} type={type_name}: {e}", file=sys.stderr)
+        return []
     rows = []
-    # 东财实际返回里 result.cmsArticleWebOld 直接就是文章列表（非 {list:[...]} 嵌套）
-    articles = d.get("result", {}).get("cmsArticleWebOld", []) or []
+    result = d.get("result", {}) or {}
+    articles = result.get(type_name, []) or []
+    if isinstance(articles, dict):
+        articles = articles.get("list") or articles.get("data") or []
     for a in articles:
         rows.append({
             "title": re.sub(r'<[^>]+>', '', a.get("title", "")),
@@ -68,6 +98,46 @@ def eastmoney_stock_news(code: str, page_size: int = 20) -> list[dict]:
             "source": a.get("mediaName", ""),
             "url": a.get("url", ""),
         })
+    return rows
+
+
+def sina_stock_news(code: str, page_size: int = 20) -> list[dict]:
+    """新浪个股资讯页兜底。"""
+    symbol = market_symbol(code)
+    url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllNewsStock/symbol/{symbol}.phtml"
+    try:
+        r = requests.get(url, headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+                         timeout=15)
+        r.encoding = "gb2312"
+    except Exception as e:
+        print(f"[WARN] 新浪个股新闻兜底失败: {e}", file=sys.stderr)
+        return []
+
+    rows = []
+    seen = set()
+    for href, title in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', r.text, flags=re.S):
+        title = re.sub(r"<[^>]+>", "", title)
+        title = unescape(title).strip()
+        href = unescape(href).strip()
+        if not title or len(title) < 6:
+            continue
+        if "realstock/company" in href or "javascript:" in href:
+            continue
+        if not href.startswith("http"):
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+        m = re.search(r"/(\d{4}-\d{2}-\d{2})/", href)
+        rows.append({
+            "title": title,
+            "content": "",
+            "time": m.group(1) if m else "",
+            "source": "新浪财经",
+            "url": href,
+        })
+        if len(rows) >= page_size:
+            break
     return rows
 
 

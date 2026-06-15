@@ -54,9 +54,9 @@ uv run scripts/fundamentals.py report <code> [--table lrb] [--num 8]
 | f43  | price        | 当前价 |
 
 > **风控与优雅降级（必读）：** 东财 push2 在**部分大陆住宅 IP** 上有风控，握手阶段
-> 直接断连（`RemoteDisconnected` / `ConnectionError`）。旧 §6.3 代码没有 try/except，
-> 遇到风控会直接抛异常崩溃。现已用 `try/except` 包住 `em_get` + `.json()`，失败时
-> 打印 `[WARN] ... {e}` 到 **stderr** 并返回空 dict `{}`（优雅降级，不中断上层流程）。
+> 直接断连（`RemoteDisconnected` / `ConnectionError`）。现已改用 `em_push2_get()` 加强请求指纹；
+> 若当前 IP 仍被断连,会 fallback 到 HSF10 公司概况/股本结构 + 腾讯行情 + mootdx 财务快照,
+> 返回主要字段并标记 `source="fallback_hsf10_tencent_mootdx"`。
 
 ---
 

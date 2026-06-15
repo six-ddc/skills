@@ -43,8 +43,9 @@ uv run scripts/news.py global [--page-size 50]
 
 > **⚠️ 间歇性返回空：** 部分大陆住宅 IP 调本接口会只拿到 `passportWeb`（股民资料）
 > 而无 `cmsArticleWebOld`（文章列表）——这是东财对该 IP 的间歇风控，**非代码 bug**
-> （同一代码在其他网络/时段实测正常）。代码已对空结果安全返回 `[]`；遇到时隔几分钟、
-> 换网络环境（如手机热点）或降低请求频率（调大 `EM_MIN_INTERVAL`）后重试即可。
+> （同一代码在其他网络/时段实测正常）。代码会尝试 `cmsArticleWebOld/cmsArticleWeb` 与
+> `代码/简称/代码+简称` 多组搜索并去重；东财仍为空时 fallback 到新浪个股资讯页,
+> 返回 `source="新浪财经"` 的 `{title, content, time, source, url}`。
 
 ---
 

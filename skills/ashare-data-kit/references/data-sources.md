@@ -28,8 +28,12 @@
 4. **带正常 UA + Referer**(脚本已配好)。
 5. **批量循环每只之间 sleep** —— AI 跑批量(如逐个拉 100 只龙虎榜)是被封头号元凶。
 
-### 已内置:所有东财请求走 `em_get()`
-`scripts/_common.py` 的 `em_get()` 自动做:串行限流(`EM_MIN_INTERVAL=1.0s` + 随机抖动)+ 复用 `EM_SESSION`(Keep-Alive)+ 默认 UA。**所有 eastmoney.com 端点代码都已走 `em_get`,直接跑即自带防封。** 批量任务把 `EM_MIN_INTERVAL` 调大即可。
+### 已内置:东财请求统一限流
+`scripts/_common.py` 的 `em_get()` 自动做:串行限流(`EM_MIN_INTERVAL=1.0s` + 随机抖动)+ 复用 `EM_SESSION`(Keep-Alive)+ 默认 UA。**常规 eastmoney.com 端点代码都走 `em_get`,直接跑即自带防封。** 批量任务把 `EM_MIN_INTERVAL` 调大即可。
+
+push2 / push2his 少数端点会对共享 Keep-Alive 连接直接断开。此类端点改走 `em_push2_get()`:
+仍复用同一全局限流,但用新连接 + quote 页 `ut` + `qgqp_b_id` cookie + 浏览器 headers,并支持 JSONP 解析。
+它能降低 `RemoteDisconnected` 概率,但若当前 IP 已进入连接级风控窗口,仍需等待或换网络。
 
 > **已知环境性问题(非代码 bug):** 部分**大陆住宅宽带 IP** 被东财 push2 系列(尤其 `stock/get`、`stock/fflow/kline`)间歇风控,表现为 `RemoteDisconnected` / `HTTP 000` / 空数据。同一脚本换网络/时段实测正常。脚本已对这类失败优雅降级(打印 `[WARN]` 到 stderr、返回空)。遇到时:隔几分钟重试 / 换网络(手机热点)/ 调大 `EM_MIN_INTERVAL`。
 

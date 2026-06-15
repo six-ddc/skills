@@ -104,7 +104,10 @@ uv run scripts/signals.py industry [--top-n 20]
 
 > **说明：** 百度 PAE `fundflow` 和 `fundsortlist` 接口已于 2026-05 下线（返回 null），改用东财 push2 资金流 API。
 
-本接口**保留原有 try/except 优雅降级**：请求失败时打印 `[WARN]` 到 stderr、返回 `[]`，不中断批量流程。
+本接口**保留原有 try/except 优雅降级**。若东财 push2 被当前 IP 连接级风控(`RemoteDisconnected`),
+会 fallback 到新浪 MoneyFlow 最近日级资金流,返回 1 条并标记 `source="sina_moneyflow"`、
+`granularity="daily_latest"`。新浪口径不是分钟级五档拆单,`small_net/mid_net/super_net` 会为 `null`,
+不要和东财分钟级数据混作同一口径。
 
 ---
 
@@ -144,7 +147,9 @@ rank / name / change_pct / code / up_count / down_count / leader(领涨股) / le
 
 > **为何从同花顺换东财：** 同花顺行业板块接口**加了反爬（实测返回 401）**，故行业板块排名改用东财
 > `clist` 接口（`m:90+t:2` 即行业板块板块类，零鉴权、一次请求拿全）。注意东财 clist 大页/高频易触发风控，
-> 已统一经 `em_get` 限流。
+> 已统一经 `em_push2_get` 限流与浏览器指纹请求。若当前 IP 仍被连接级风控,自动 fallback 到新浪行业板块
+> `newSinaHy.php`,并在行内标记 `source="sina_industry"`。新浪字段口径与东财略有差异,`up_count/down_count`
+> 无法提供时填 0。
 
 ---
 

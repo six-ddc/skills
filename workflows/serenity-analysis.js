@@ -56,6 +56,33 @@ const VOICE = `Serenity 的口吻规则（写"长帖"部分时遵守）：
 - 公开帖藏模型：长帖里只给 high-level 量化结论（"市值 vs 内容价值差一个数量级"），不摆完整推导——推导放底稿。
 - 证据分层措辞：confirmed 直说；reported 写"据 MS/UDN 报道"；mapped/speculation 写"我把它映射到/我推断/likely"。绝不把推断写成事实。`
 
+// ───────────────────────── ashare-data-kit 接入 ─────────────────────────
+// A 股标的优先走 ashare-data-kit skill 取一手数据；只在判定为 A 股时注入提示，避免污染美股/海外标的
+const looksAshare = (...parts) => {
+  const s = parts.filter(Boolean).join(' ')
+  if (/A\s*股|中国|中國|沪深|沪市|深市|北交所|上海证券交易所|深圳证券交易所|北京证券交易所|\bCN\b|\bSSE\b|\bSZSE\b|\bBSE\b/i.test(s)) return true
+  if (/(^|\D)(60|68|00|30|43|83|87|92|90)\d{4}(\D|$)/.test(s)) return true   // 沪 60/68 深 00/30 北/新三板 43/83/87/92/90
+  return false
+}
+
+// 六路 → ashare-data-kit 七层脚本的定向映射
+const ASHARE_LANE_KIT = {
+  financials:  'fundamentals(个股信息 info/财务快照 finance/F10/财报三表 report) 取一手财务；reports eps 取机构一致预期 EPS；valuation full 跑综合估值；quotes realtime 取最新价/PE/PB/市值。',
+  supplychain: 'reports(list 研报列表 / iwencai NL 语义搜产业链·供应链·客户订单研报)；signals blocks(概念板块归属)；news stock(个股新闻里的供应/订单线索)。',
+  ownership:   'capital(margin 融资融券 / holders 股东户数=筹码集中)；signals(northbound 北向沪深股通 / dragon+market-dragon 龙虎榜席位营业部 / fundflow 主力资金流 / lockup 限售解禁日历)。',
+  moat:        'signals industry(行业涨跌排名/轮动)；reports(list / iwencai 竞争格局·市占·技术路线研报)；fundamentals f10(主营与竞争地位)。',
+  narrative:   'signals(hot 当日强势股+题材归因 / blocks 概念热度)；news(stock 个股新闻 / global 全球资讯)。',
+  policy:      'announcements list(巨潮公告全文，取监管/政策/项目一手文件)；news(政策与产业新闻)。',
+}
+
+const ashareKitBlock = (kit) => `
+
+## A 股一手数据（本标的为 A 股，重要）
+查数据时**优先使用 \`ashare-data-kit\` skill**（A 股全栈数据工具包，七层 uv 可执行脚本，取交易所/公司一手数据，不靠记忆），WebSearch/WebFetch 仅作补充与交叉验证。
+- 本路重点用：${kit}
+- 用法：直接调用 \`ashare-data-kit\` skill，按其 SKILL.md 命令速查表运行对应脚本（形如 \`uv run scripts/<layer>.py <command> <6位代码> [--json]\`）；不要写死任何绝对路径。
+- 证据分层：脚本取到的行情/财报/股东户数/龙虎榜/解禁/融资融券/巨潮公告等公司或交易所一手披露记 confirmed；券商研报/一致预期记 reported；skill 拿不到再退回网络检索。`
+
 // ───────────────────────── Schemas ─────────────────────────
 const SCOPE_SCHEMA = {
   type: 'object',
@@ -246,7 +273,8 @@ ${subj.whyChokepoint ? '初筛理由：' + subj.whyChokepoint + '\n' : ''}
    - 带 source（URL 或明确出处）与 asOf（信息时点）；
    - direction 标 bullish/bearish/neutral；loadBearing 标 core/supporting/minor。
 3. 多空都要找：至少 2 条 bearish 方向的事实；实在找不到就在 laneSummary 里明说"未找到看空证据"及原因。
-4. 查不到的就说查不到，不要编。结构化返回。`
+4. 查不到的就说查不到，不要编。结构化返回。` +
+  (subj.ashare ? ashareKitBlock(ASHARE_LANE_KIT[lane.key] || '按需调用对应 layer 脚本取一手数据。') : '')
 
 const verifyPrompt = (subj, f, v) =>
   `## 对抗式事实审查员（第 ${v + 1}/${VOTES} 票）——默认怀疑，满票出席时 ≥${REFUTES}/${VOTES} 票否决即剔除（有人弃权时阈值按有效票等比缩放）
@@ -261,7 +289,7 @@ const verifyPrompt = (subj, f, v) =>
 3. 【层级审计】这条申报的 tier 配得上证据吗？pipeline≠orders、qualification≠volume ramp、生态相邻≠量产订单、"据报道"≠公司披露。给出 tierAfterAudit（审计后真实层级，只许持平或降级，不许升级）。
 4. 过期了吗？快速变化的领域里旧信息要打折（对照 asOf）。
 5. 是不是 marketing 稿/PR/拉抬性内容/论坛猜测？
-
+${subj.ashare ? '6. 【A 股复核】若本事实涉及可由 `ashare-data-kit` skill 直接取数的 A 股数据（行情/财报/股东户数/龙虎榜/解禁/融资融券/巨潮公告/一致预期），优先用该 skill 重新取数核对原始口径，而非仅凭网页。\n' : ''}
 refuted=true 当：来源不支持 / 被可信反证推翻 / 来源质量撑不起陈述强度 / 严重过期 / 营销水分。
 refuted=false 仅当：陈述有据、时效可用、层级（按审计后）匹配。不确定时默认 refuted=true。
 evidence 必须具体。结构化返回。`
@@ -282,7 +310,11 @@ ${JSON.stringify(facts.map((f) => ({ fact: f.fact, tier: f.finalTier, asOf: f.as
 要求：
 1. 先 WebSearch 当前市值/股本/估值水位（不许凭记忆）；若存在指数纳入事件/预期，测算强制被动买盘金额并对照流通盘与空头比例给出挤压空间（他 $SIVE 式的标准算术），并入 marketCapContext 或 mcap-mismatch。
 2. 每条假设显式写出，并标注它建立在哪个证据层级上；建立在 verified=false 或 mapped/speculation 事实上的假设必须在 modelNote 里自首。
-3. 结果分 bear/base/bull 情景给数量级；指出最脆弱的假设。结构化返回。`
+3. 结果分 bear/base/bull 情景给数量级；指出最脆弱的假设。结构化返回。` +
+  (subj.ashare ? `
+
+## A 股估值数据（本标的为 A 股）
+市值/股本/PE/PB/估值水位优先用 \`ashare-data-kit\` skill：quotes realtime(最新价/PE/PB/总市值/流通市值/涨跌停)、valuation full(前向 PE/PEG/PE 消化公式)、reports eps(机构一致预期 EPS)、capital holders(股东户数辅助流通盘判断)；不要写死绝对路径，WebSearch 仅补充。` : '')
 
 const verdictPrompt = (subj, facts, killed, quant) =>
   PERSONA + `
@@ -380,7 +412,7 @@ const scope = await agent(
 用户给的目标：${TARGET}
 ${FORCED_MODE ? '用户已指定模式：' + FORCED_MODE + '（mode 直接用它）' : '判定模式：单一公司/股票 → stock；行业/主题/产业链 → industry。'}
 
-任务：可先用 WebSearch 确认目标所指（ticker 歧义、公司全名、所在市场）。返回：mode、subjectName（规范化）、market、architectureContext（它属于哪个下一代架构切换语境、为什么这一环现在重要）、keyQuestions（本次调研要回答的 3-6 个关键问题，按他的方法论出题：卡口在哪/证据到哪层/资金结构干不干净/机构路径/估值数量级）。结构化返回。`,
+任务：可先用 WebSearch 确认目标所指（ticker 歧义、公司全名、所在市场）。若疑似 A 股（6 位代码 / 中国大陆上市），直接用 \`ashare-data-kit\` skill 的 quotes realtime 确认代码、简称、所属市场与当前市值（不写死绝对路径），并把 market 标为 CN。返回：mode、subjectName（规范化）、market、architectureContext（它属于哪个下一代架构切换语境、为什么这一环现在重要）、keyQuestions（本次调研要回答的 3-6 个关键问题，按他的方法论出题：卡口在哪/证据到哪层/资金结构干不干净/机构路径/估值数量级）。结构化返回。`,
   { label: 'scope', phase: 'Scope', schema: SCOPE_SCHEMA }
 )
 if (!scope) {
@@ -403,6 +435,7 @@ if (MODE === 'industry') {
 架构语境：${scope.architectureContext}
 
 任务：
+0. 若这条链是中国 A 股产业链，用 \`ashare-data-kit\` skill 辅助拆链与初筛：signals(industry 行业排名/轮动、hot 题材归因、blocks 板块归属)、reports(iwencai NL 搜产业链研报)；候选 ticker 用 6 位代码、market 标 CN（不写死绝对路径）。
 1. 用 WebSearch 把这条链按环节拆开（segments）：上游材料/设备 → 关键部件 → 制造/封装 → 集成 → 终端需求，每环标 bottleneckRisk。
 2. 找 chokepoint 候选（candidates，最多 10 个）：对每个候选预答 chokepoint 三问。他的偏好排序：供给紧+替代难+市场没懂 > 小中盘 > 非美但有美国资金可达路径（NASDAQ/ADR/指数纳入空间）；中国标的需显式标注司法/政策折价；纯 integrator、纯 logo-partnership 故事、明显 toxic 融资结构的直接降权。
 3. priority 从 1 开始排，给出 mapNarrative。结构化返回。`,
@@ -418,12 +451,14 @@ if (MODE === 'industry') {
   subjects = picked.map((c) => ({
     name: c.name, market: c.market || '', context: scope.architectureContext + '；链位：' + (c.segment || ''),
     whyChokepoint: c.whyChokepoint, short: String(c.ticker || c.name).replace(/[^A-Za-z0-9.$一-龥]+/g, '').slice(0, 16),
+    ashare: looksAshare(c.market, c.name, c.ticker),
   }))
   log(`产业链 ${map.segments.length} 环；候选 ${sorted.length} 个，深挖 Top ${picked.length}：${picked.map((c) => c.name).join('、')}${droppedCandidates.length ? `；未深挖 ${droppedCandidates.length} 个（列入报告局限）` : ''}`)
 } else {
   subjects = [{
     name: scope.subjectName, market: scope.market || '', context: scope.architectureContext,
     whyChokepoint: '', short: String(scope.subjectName).replace(/[^A-Za-z0-9.$一-龥]+/g, '').slice(0, 16),
+    ashare: looksAshare(scope.market, scope.subjectName, TARGET),
   }]
 }
 

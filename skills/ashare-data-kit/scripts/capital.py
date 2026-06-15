@@ -23,7 +23,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _common import UA, build_cli, eastmoney_datacenter, em_get, norm_ticker, output
+import requests
+
+from _common import (UA, build_cli, eastmoney_datacenter, em_get, em_push2_get,
+                     norm_ticker, output, response_json)
 
 
 def margin_trading(code: str, page_size: int = 30) -> list[dict]:
@@ -142,21 +145,21 @@ def stock_fund_flow_120d(code: str) -> list[dict]:
     url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
     params = {
         "secid": f"{market_code}.{code}",
+        "klt": "101",
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
         "lmt": "120",
     }
     headers = {
-        "User-Agent": UA,
-        "Referer": "https://quote.eastmoney.com/",
+        "Referer": f"https://quote.eastmoney.com/{'sh' if code.startswith('6') else 'sz'}{code}.html",
         "Origin": "https://quote.eastmoney.com",
     }
     try:
-        r = em_get(url, params=params, headers=headers, timeout=15)
-        d = r.json()
+        r = em_push2_get(url, params=params, headers=headers, timeout=15, jsonp=True)
+        d = response_json(r)
     except Exception as e:
         print(f"[WARN] push2 资金流请求失败: {e}", file=sys.stderr)
-        return []
+        return sina_fund_flow_daily(code)
     klines = d.get("data", {}).get("klines", [])
 
     rows = []
@@ -171,6 +174,46 @@ def stock_fund_flow_120d(code: str) -> list[dict]:
                 "large_net": float(parts[4]) if parts[4] != "-" else 0,
                 "super_net": float(parts[5]) if parts[5] != "-" else 0,
             })
+    return rows or sina_fund_flow_daily(code)
+
+
+def sina_fund_flow_daily(code: str, num: int = 120) -> list[dict]:
+    """新浪 MoneyFlow 日级兜底；口径不同于东财小/中/大/超大单拆分。"""
+    code = norm_ticker(code)
+    symbol = ("sh" if code.startswith("6") else "sz") + code
+    url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs"
+    params = {"daima": symbol, "page": "1", "num": str(num)}
+    try:
+        r = requests.get(url, params=params,
+                         headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+                         timeout=15)
+        r.encoding = "gbk"
+        data = r.json()
+    except Exception as e:
+        print(f"[WARN] 新浪资金流日级兜底失败: {e}", file=sys.stderr)
+        return []
+
+    rows = []
+    for row in data[:num]:
+        def f(key):
+            try:
+                return float(row.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        rows.append({
+            "date": row.get("opendate", ""),
+            "main_net": f("netamount"),
+            "small_net": None,
+            "mid_net": None,
+            "large_net": f("r0_net"),
+            "super_net": None,
+            "source": "sina_moneyflow",
+            "close": f("trade"),
+            "change_pct": round(f("changeratio") * 100, 4),
+            "turnover": f("turnover"),
+            "net_ratio": f("ratioamount"),
+            "r0_ratio": f("r0_ratio"),
+        })
     return rows
 
 

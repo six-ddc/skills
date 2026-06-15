@@ -132,7 +132,9 @@ premium_pct = (DEAL_PRICE / CLOSE_PRICE - 1) × 100
 > （÷1e4 得万元、÷1e8 得亿元）。本命令是日级（daykline）；分钟级日内资金流见 Layer 3 `signals.py fundflow`。
 
 > **优雅降级：** 本接口**保留原有 try/except 优雅降级** —— push2his 请求失败时打印
-> `[WARN] push2 资金流请求失败: ...` 到 **stderr**、返回 `[]`，不中断批量流程。`klines` 每行按逗号切，
+> `[WARN] push2 资金流请求失败: ...` 到 **stderr**。若新浪 MoneyFlow 可用,自动返回最近 120 条日级资金流,
+> 并标记 `source="sina_moneyflow"`；新浪口径不同于东财小/中/大/超大单拆分,`small_net/mid_net/super_net`
+> 会为 `null`,同时保留 `net_ratio/r0_ratio` 等新浪字段。`klines` 每行按逗号切,
 > 字段不足 7 个的行跳过；分量值为 `"-"` 记 0。
 
 #### 字段速查

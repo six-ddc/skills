@@ -19,6 +19,7 @@ Field tables / gotchas (e.g. Tencent index 46 = PB, not 43): references/quotes.m
 """
 import os
 import sys
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -169,15 +170,132 @@ def baidu_kline_with_ma(code: str, start_time: str = "") -> dict:
     d = r.json()
     if str(d.get("ResultCode", -1)) != "0":
         print(f"[WARN] 百度股市通 ResultCode={d.get('ResultCode')} "
-              f"(部分 IP 现返回 403/风控)，返回空。", file=sys.stderr)
-        return {"keys": [], "rows": []}
+              f"(部分 IP 现返回 403/风控)，改用腾讯/新浪/mootdx 本地计算 MA。", file=sys.stderr)
+        return kline_ma_fallback(code, start_time)
     result = d.get("Result")
     if not isinstance(result, dict):       # blocked → Result is [] ; degrade gracefully
-        print("[WARN] 百度股市通 Result 非预期结构，返回空。", file=sys.stderr)
-        return {"keys": [], "rows": []}
+        print("[WARN] 百度股市通 Result 非预期结构，改用腾讯/新浪/mootdx 本地计算 MA。", file=sys.stderr)
+        return kline_ma_fallback(code, start_time)
     md = result.get("newMarketData", {}) or {}
     return {"keys": md.get("keys", []),
             "rows": [r for r in md.get("marketData", "").split(";") if r]}
+
+
+def _rows_with_ma(rows: list[dict], source: str, start_time: str = "") -> dict:
+    start_dt = None
+    if start_time:
+        try:
+            start_dt = datetime.strptime(start_time, "%Y%m%d")
+        except ValueError:
+            start_dt = None
+
+    closes = []
+    out = []
+    for row in rows:
+        close = float(row.get("close") or 0)
+        closes.append(close)
+        date_text = str(row.get("date") or row.get("datetime", ""))[:10]
+        try:
+            row_dt = datetime.strptime(date_text, "%Y-%m-%d")
+        except ValueError:
+            row_dt = None
+        if start_dt and row_dt and row_dt < start_dt:
+            continue
+
+        def ma(n):
+            return round(sum(closes[-n:]) / n, 3) if len(closes) >= n else None
+
+        out.append({
+            "date": date_text,
+            "open": row.get("open", 0),
+            "close": close,
+            "high": row.get("high", 0),
+            "low": row.get("low", 0),
+            "volume": row.get("volume", row.get("vol", 0)),
+            "amount": row.get("amount", 0),
+            "ma5": ma(5),
+            "ma10": ma(10),
+            "ma20": ma(20),
+        })
+    return {
+        "keys": ["date", "open", "close", "high", "low", "volume", "amount", "ma5", "ma10", "ma20"],
+        "rows": out,
+        "source": source,
+    }
+
+
+def tencent_kline_with_ma(code: str, start_time: str = "") -> dict:
+    symbol = market_symbol(code)
+    url = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
+    params = {"param": f"{symbol},day,,,120"}
+    r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+    data = r.json().get("data", {}).get(symbol, {})
+    raw_rows = data.get("day") or data.get("qfqday") or []
+    rows = []
+    for it in raw_rows:
+        if len(it) < 6:
+            continue
+        rows.append({
+            "date": it[0],
+            "open": float(it[1]),
+            "close": float(it[2]),
+            "high": float(it[3]),
+            "low": float(it[4]),
+            "volume": float(it[5]),
+        })
+    return _rows_with_ma(rows, "tencent_fallback", start_time)
+
+
+def sina_kline_with_ma(code: str, start_time: str = "") -> dict:
+    symbol = market_symbol(code)
+    url = "https://quotes.sina.cn/cn/api/openapi.php/CN_MarketDataService.getKLineData"
+    params = {"symbol": symbol, "scale": "240", "ma": "no", "datalen": "120"}
+    r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+    raw_rows = r.json().get("result", {}).get("data", []) or []
+    rows = []
+    for it in raw_rows:
+        rows.append({
+            "date": it.get("day", ""),
+            "open": float(it.get("open") or 0),
+            "close": float(it.get("close") or 0),
+            "high": float(it.get("high") or 0),
+            "low": float(it.get("low") or 0),
+            "volume": float(it.get("volume") or 0),
+        })
+    return _rows_with_ma(rows, "sina_fallback", start_time)
+
+
+def kline_ma_fallback(code: str, start_time: str = "") -> dict:
+    for fn in (tencent_kline_with_ma, sina_kline_with_ma, mootdx_kline_with_ma):
+        try:
+            data = fn(code, start_time)
+            if data.get("rows"):
+                return data
+        except Exception as e:
+            print(f"[WARN] {fn.__name__} 失败: {e}", file=sys.stderr)
+    return {"keys": [], "rows": [], "source": "empty"}
+
+
+def mootdx_kline_with_ma(code: str, start_time: str = "") -> dict:
+    """Fallback K线 + MA5/10/20 from mootdx when Baidu is blocked."""
+    try:
+        rows = mootdx_kline(code, "day", 120)
+    except Exception as e:
+        print(f"[WARN] mootdx K线兜底失败: {e}", file=sys.stderr)
+        return {"keys": [], "rows": [], "source": "empty"}
+
+    normalized = []
+    for row in rows:
+        normalized.append({
+            "date": str(row.get("datetime", ""))[:10],
+            "open": row.get("open", 0),
+            "close": row.get("close", 0),
+            "high": row.get("high", 0),
+            "low": row.get("low", 0),
+            "volume": row.get("volume", row.get("vol", 0)),
+            "amount": row.get("amount", 0),
+        })
+    return _rows_with_ma(normalized, "mootdx_fallback", start_time)
 
 
 def main():

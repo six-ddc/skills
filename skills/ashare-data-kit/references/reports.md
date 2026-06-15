@@ -52,9 +52,10 @@ uv run scripts/reports.py iwencai "光模块 1.6T 量产" --channel report --siz
 `pdf <info_code>` → URL 模板 `https://pdf.dfcfw.com/pdf/H3_{info_code}_1.pdf`。
 默认存到 `./{info_code}.pdf`, 可用 `--out` 指定路径; 打印保存路径与字节数。
 
-**踩坑: PDF 必须带 `Referer: https://data.eastmoney.com/`**, 否则 `pdf.dfcfw.com` 风控,
-返回非 200 或极小的占位内容。本脚本经 `em_get` 复用限流会话并自动带该 Referer。
-仅当 `status_code == 200` 且内容 `>= 1024` 字节时才落盘, 否则返回 warning。
+**踩坑: PDF 必须带 `Referer: https://data.eastmoney.com/`**, 否则 `pdf.dfcfw.com` 风控。
+该域名有时会先返回约 1KB 的 `<script>` cookie 挑战, 本脚本会解析 `__tst_status` /
+`EO_Bot_Ssid` 后重试一次。本脚本经 `em_get` 复用限流会话并自动带 Referer。
+仅当 `status_code == 200`、内容以 `%PDF` 开头且内容 `>= 1024` 字节时才落盘, 否则返回 warning。
 
 ## 2.2 同花顺机构一致预期 EPS (直连 basic.10jqka.com.cn)
 

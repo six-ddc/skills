@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import requests
 
-from _common import UA, build_cli, df_records, em_get, norm_ticker, output
+from _common import (UA, build_cli, df_records, em_push2_get, norm_ticker,
+                     output, response_json)
 
 
 def eastmoney_stock_info(code: str) -> dict:
@@ -46,14 +47,16 @@ def eastmoney_stock_info(code: str) -> dict:
         "fields": "f57,f58,f84,f85,f127,f116,f117,f189,f43",
         "secid": f"{market_code}.{code}",
     }
-    headers = {"User-Agent": UA}
+    headers = {"Referer": f"https://quote.eastmoney.com/{'sh' if code.startswith('6') else 'sz'}{code}.html"}
     try:
-        r = em_get(url, params=params, headers=headers, timeout=10)
-        d = r.json().get("data", {}) or {}
+        r = em_push2_get(url, params=params, headers=headers, timeout=15)
+        d = response_json(r).get("data", {}) or {}
     except Exception as e:
         print(f"[WARN] 东财个股基本面请求失败 (部分大陆住宅 IP 被 push2 风控): {e}",
               file=sys.stderr)
-        return {}
+        return stock_info_fallback(code)
+    if not d:
+        return stock_info_fallback(code)
     return {
         "code": d.get("f57", ""),
         "name": d.get("f58", ""),
@@ -64,7 +67,80 @@ def eastmoney_stock_info(code: str) -> dict:
         "float_mcap": d.get("f117", 0),      # 流通市值(元)
         "list_date": str(d.get("f189", "")), # 上市日期 YYYYMMDD
         "price": d.get("f43", 0),
+        "source": "eastmoney_push2",
     }
+
+
+def stock_info_fallback(code: str) -> dict:
+    """Fallback from HSF10 + Tencent quote + mootdx finance when push2 is blocked."""
+    out = {
+        "code": norm_ticker(code),
+        "name": "",
+        "industry": "",
+        "total_shares": 0,
+        "float_shares": 0,
+        "mcap": 0,
+        "float_mcap": 0,
+        "list_date": "",
+        "price": 0,
+        "source": "fallback_hsf10_tencent_mootdx",
+    }
+    code6 = norm_ticker(code)
+    market = "SH" if code6.startswith("6") else "SZ"
+
+    try:
+        url = "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax"
+        r = requests.get(url, params={"code": f"{market}{code6}"},
+                         headers={"User-Agent": UA, "Referer": "https://emweb.securities.eastmoney.com/"},
+                         timeout=15)
+        row = (r.json().get("jbzl") or [{}])[0]
+        out.update({
+            "name": row.get("SECURITY_NAME_ABBR") or out["name"],
+            "industry": row.get("EM2016") or row.get("INDUSTRYCSRC1") or out["industry"],
+        })
+    except Exception as e:
+        print(f"[WARN] HSF10 公司概况兜底失败: {e}", file=sys.stderr)
+
+    try:
+        url = "https://emweb.securities.eastmoney.com/PC_HSF10/CapitalStockStructure/PageAjax"
+        r = requests.get(url, params={"code": f"{market}{code6}"},
+                         headers={"User-Agent": UA, "Referer": "https://emweb.securities.eastmoney.com/"},
+                         timeout=15)
+        row = (r.json().get("gbjg") or [{}])[0]
+        out.update({
+            "total_shares": row.get("TOTAL_SHARES") or out["total_shares"],
+            "float_shares": row.get("UNLIMITED_SHARES") or out["float_shares"],
+        })
+    except Exception as e:
+        print(f"[WARN] HSF10 股本结构兜底失败: {e}", file=sys.stderr)
+
+    try:
+        from quotes import tencent_quote
+        q = tencent_quote([code])
+        if q:
+            q = q[0]
+            out.update({
+                "name": q.get("name", ""),
+                "price": q.get("price", 0),
+                "mcap": (q.get("mcap_yi") or 0) * 1e8,
+                "float_mcap": (q.get("float_mcap_yi") or 0) * 1e8,
+            })
+    except Exception as e:
+        print(f"[WARN] 腾讯行情基本面兜底失败: {e}", file=sys.stderr)
+
+    try:
+        fin = mootdx_finance(code)
+        if fin:
+            row = fin[0]
+            out.update({
+                "industry": out["industry"] or row.get("industry", ""),
+                "total_shares": out["total_shares"] or row.get("zongguben", 0),
+                "float_shares": out["float_shares"] or row.get("liutongguben", 0),
+                "list_date": str(row.get("ipo_date", "")),
+            })
+    except Exception as e:
+        print(f"[WARN] mootdx 基本面兜底失败: {e}", file=sys.stderr)
+    return out
 
 
 def mootdx_finance(code: str) -> list[dict]:

@@ -21,13 +21,14 @@ Commands:
 Field tables / API Key 申请 / X-Claw / 踩坑: references/reports.md
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import requests
 
-from _common import build_cli, df_records, em_get, output
+from _common import build_cli, df_records, em_get, norm_ticker, output
 
 
 # ── East money 研报 (A级公开JSON API, 免费无key) ──────────────────────────
@@ -37,6 +38,7 @@ PDF_TPL = "https://pdf.dfcfw.com/pdf/H3_{info_code}_1.pdf"
 
 def eastmoney_reports(code: str, max_pages: int = 5) -> list[dict]:
     """拉取指定股票的研报列表"""
+    code = norm_ticker(code)
     all_records = []
     for page in range(1, max_pages + 1):
         params = {
@@ -59,23 +61,48 @@ def eastmoney_reports(code: str, max_pages: int = 5) -> list[dict]:
     return all_records
 
 
+def _dfcfw_bot_cookies(html: str) -> dict:
+    """Parse the lightweight pdf.dfcfw.com cookie challenge."""
+    nums = dict((name, int(value))
+                for name, value in re.findall(r"(WTKkN|bOYDu|wyeCN):(\d+)", html))
+    ssid = re.search(r't,(\d+)\)', html)
+    if not ssid or not all(k in nums for k in ("WTKkN", "bOYDu", "wyeCN")):
+        return {}
+    return {
+        "__tst_status": f"{nums['WTKkN'] + nums['bOYDu'] + nums['wyeCN']}#",
+        "EO_Bot_Ssid": ssid.group(1),
+    }
+
+
 def download_pdf(info_code: str, out_path: str | None = None) -> dict:
     """下载单份研报 PDF (按 infoCode), 返回保存路径与字节数。
 
-    PDF 走 pdf.dfcfw.com, 必须带 Referer: https://data.eastmoney.com/ , 否则被风控。
-    经 em_get 复用限流会话。
+    PDF 走 pdf.dfcfw.com, 必须带 Referer: https://data.eastmoney.com/。
+    若返回轻量 JS cookie 挑战, 解析 cookie 后经 em_get 重试一次。
     """
     from pathlib import Path
 
     target = Path(out_path) if out_path else Path(f"./{info_code}.pdf")
     url = PDF_TPL.format(info_code=info_code)
-    r = em_get(url, headers={"Referer": "https://data.eastmoney.com/"}, timeout=60)
-    if r.status_code == 200 and len(r.content) >= 1024:
+    headers = {"Referer": "https://data.eastmoney.com/"}
+    r = em_get(url, headers=headers, timeout=60)
+    challenge_solved = False
+    if r.status_code == 200 and r.content.lstrip().startswith(b"<script>"):
+        cookies = _dfcfw_bot_cookies(r.text)
+        if cookies:
+            r = em_get(url, headers=headers, cookies=cookies, timeout=60)
+            challenge_solved = True
+
+    is_pdf = r.content.lstrip().startswith(b"%PDF")
+    if r.status_code == 200 and is_pdf and len(r.content) >= 1024:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(r.content)
-        return {"path": str(target), "bytes": len(r.content), "status": r.status_code}
+        return {"path": str(target), "bytes": len(r.content),
+                "status": r.status_code, "challenge_solved": challenge_solved}
     return {"path": None, "bytes": len(r.content),
-            "status": r.status_code, "warning": "下载失败(非200或内容过小)"}
+            "status": r.status_code,
+            "warning": "下载失败(非200、非PDF或内容过小)",
+            "challenge_solved": challenge_solved}
 
 
 # ── 同花顺机构一致预期EPS (直连 basic.10jqka.com.cn, 非东财) ───────────────
@@ -89,6 +116,7 @@ def ths_eps_forecast(code: str):
     import pandas as pd
     from io import StringIO
 
+    code = norm_ticker(code)
     url = f"https://basic.10jqka.com.cn/new/{code}/worth.html"
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -96,7 +124,11 @@ def ths_eps_forecast(code: str):
     }
     r = requests.get(url, headers=headers, timeout=15)
     r.encoding = "gbk"
-    dfs = pd.read_html(StringIO(r.text))
+    try:
+        dfs = pd.read_html(StringIO(r.text))
+    except Exception as e:
+        print(f"[WARN] 同花顺一致预期表格解析失败/为空: {e}", file=sys.stderr)
+        return pd.DataFrame()
     # 找含"每股收益"的表格
     for df in dfs:
         cols = [str(c) for c in df.columns]

@@ -14,6 +14,7 @@ import argparse
 import json as _json
 import random
 import time
+import uuid
 
 import requests
 
@@ -78,6 +79,7 @@ def secid(code: str) -> str:
 # serial throttle (min interval + jitter) + Keep-Alive session reuse. Batch jobs
 # should raise EM_MIN_INTERVAL. See references/data-sources.md for the full rules.
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+EASTMONEY_UT = "fa5fd1943c7b386f172d6893dbfba10b"
 DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 
 EM_SESSION = requests.Session()
@@ -95,6 +97,50 @@ def em_get(url, params=None, headers=None, timeout=15, **kwargs):
         return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
     finally:
         _em_last_call[0] = time.time()
+
+
+def em_push2_get(url, params=None, headers=None, timeout=15, jsonp=False, **kwargs):
+    """Throttled East money push2/push2his GET with browser-like fingerprint.
+
+    Some push2 endpoints close shared keep-alive sessions on certain IPs. Use a
+    fresh connection plus the quote-page `ut` token and qgqp cookie for those
+    endpoints, while still respecting the global Eastmoney throttle.
+    """
+    params = dict(params or {})
+    params.setdefault("ut", EASTMONEY_UT)
+    if jsonp:
+        params.setdefault("cb", "jQuery_em")
+    req_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 Chrome/125 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Connection": "close",
+        "Cookie": f"qgqp_b_id={uuid.uuid4().hex}",
+    }
+    req_headers.update(headers or {})
+
+    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+    if wait > 0:
+        time.sleep(wait + random.uniform(0.1, 0.5))
+    try:
+        return requests.get(url, params=params, headers=req_headers, timeout=timeout, **kwargs)
+    finally:
+        _em_last_call[0] = time.time()
+
+
+def response_json(r):
+    """Parse JSON or simple JSONP responses."""
+    try:
+        return r.json()
+    except ValueError:
+        text = r.text.strip()
+        start, end = text.find("("), text.rfind(")")
+        if start >= 0 and end > start:
+            return _json.loads(text[start + 1:end])
+        raise
 
 
 def eastmoney_datacenter(report_name, columns="ALL", filter_str="", page_size=50,

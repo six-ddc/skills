@@ -28,6 +28,7 @@ Commands:
 Field tables / gotchas (reason=人工运营 tags / 北向自缓存 / push2 单位=元 …): references/signals.md
 """
 import os
+import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,7 +39,7 @@ import pandas as pd
 import requests
 
 from _common import (UA, build_cli, df_records, eastmoney_datacenter, em_get,
-                     norm_ticker, output)
+                     em_push2_get, norm_ticker, output, response_json)
 
 
 # ── 3.1 同花顺热点 — 当日强势股 + 题材归因 reason tags (同花顺, 普通 requests) ──
@@ -208,18 +209,18 @@ def eastmoney_fund_flow_minute(code: str) -> list[dict]:
         "secid": secid, "klt": 1,
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56,f57",
+        "lmt": "0",
     }
     headers = {
-        "User-Agent": UA,
-        "Referer": "https://quote.eastmoney.com/",
+        "Referer": f"https://quote.eastmoney.com/{'sh' if code.startswith('6') else 'sz'}{code}.html",
         "Origin": "https://quote.eastmoney.com",
     }
     try:
-        r = em_get(url, params=params, headers=headers, timeout=10)
-        d = r.json()
+        r = em_push2_get(url, params=params, headers=headers, timeout=15)
+        d = response_json(r)
     except Exception as e:
         print(f"[WARN] push2 资金流请求失败: {e}", file=sys.stderr)
-        return []
+        return sina_fund_flow_latest(code)
 
     rows = []
     for line in d.get("data", {}).get("klines", []):
@@ -233,7 +234,50 @@ def eastmoney_fund_flow_minute(code: str) -> list[dict]:
                 "large_net": float(parts[4]),
                 "super_net": float(parts[5]),
             })
-    return rows
+    return rows or sina_fund_flow_latest(code)
+
+
+def sina_fund_flow_latest(code: str) -> list[dict]:
+    """新浪 MoneyFlow 日级兜底；口径不同于东财分钟级五档拆单。"""
+    code = norm_ticker(code)
+    symbol = ("sh" if code.startswith("6") else "sz") + code
+    url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs"
+    params = {"daima": symbol, "page": "1", "num": "1"}
+    try:
+        r = requests.get(url, params=params,
+                         headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+                         timeout=15)
+        r.encoding = "gbk"
+        rows = r.json()
+    except Exception as e:
+        print(f"[WARN] 新浪资金流兜底失败: {e}", file=sys.stderr)
+        return []
+    if not rows:
+        return []
+
+    row = rows[0]
+
+    def f(key):
+        try:
+            return float(row.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return [{
+        "time": row.get("opendate", ""),
+        "main_net": f("netamount"),
+        "small_net": None,
+        "mid_net": None,
+        "large_net": f("r0_net"),
+        "super_net": None,
+        "source": "sina_moneyflow",
+        "granularity": "daily_latest",
+        "close": f("trade"),
+        "change_pct": round(f("changeratio") * 100, 4),
+        "turnover": f("turnover"),
+        "net_ratio": f("ratioamount"),
+        "r0_ratio": f("r0_ratio"),
+    }]
 
 
 # ── 3.5 龙虎榜席位 — 个股上榜记录 + 买卖席位 TOP5 + 机构动向 (东财 datacenter) ──
@@ -369,20 +413,21 @@ def industry_comparison(top_n: int = 20) -> dict:
     params = {
         "pn": "1", "pz": "100", "po": "1", "np": "1",
         "fltt": "2", "invt": "2",
+        "fid": "f3",
         "fs": "m:90+t:2",
         "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f128,f136,f140,f141,f207",
     }
-    headers = {"User-Agent": UA}
+    headers = {"Referer": "https://quote.eastmoney.com/center/boardlist.html"}
     try:
-        r = em_get(url, params=params, headers=headers, timeout=15)
-        d = r.json()
+        r = em_push2_get(url, params=params, headers=headers, timeout=15)
+        d = response_json(r)
     except Exception as e:
         # push2 对部分大陆住宅 IP 间歇风控(RemoteDisconnected),优雅降级而非崩溃
         print(f"[WARN] push2 行业板块请求失败: {e}", file=sys.stderr)
-        return {"top": [], "bottom": [], "total": 0}
+        return sina_industry_comparison(top_n)
     items = d.get("data", {}).get("diff", [])
     if not items:
-        return {"top": [], "bottom": [], "total": 0}
+        return sina_industry_comparison(top_n)
 
     rows = []
     for i, item in enumerate(items):
@@ -402,6 +447,50 @@ def industry_comparison(top_n: int = 20) -> dict:
         "bottom": rows[-top_n:],
         "total": len(rows),
     }
+
+
+def sina_industry_comparison(top_n: int = 20) -> dict:
+    """新浪行业板块兜底。字段口径与东财略有差异。"""
+    url = "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
+    try:
+        r = requests.get(url, headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+                         timeout=15)
+        r.encoding = "gbk"
+        text = r.text
+        start, end = text.find("{"), text.rfind("}")
+        data = json.loads(text[start:end + 1])
+    except Exception as e:
+        print(f"[WARN] 新浪行业板块兜底失败: {e}", file=sys.stderr)
+        return {"top": [], "bottom": [], "total": 0}
+
+    rows = []
+    for code, value in data.items():
+        parts = str(value).split(",")
+        if len(parts) < 13:
+            continue
+        try:
+            change_pct = float(parts[5])
+        except ValueError:
+            change_pct = 0.0
+        try:
+            leader_change = float(parts[9])
+        except ValueError:
+            leader_change = 0.0
+        rows.append({
+            "rank": 0,
+            "name": parts[1],
+            "change_pct": change_pct,
+            "code": code,
+            "up_count": 0,
+            "down_count": 0,
+            "leader": parts[12],
+            "leader_change": leader_change,
+            "source": "sina_industry",
+        })
+    rows.sort(key=lambda x: x["change_pct"], reverse=True)
+    for i, row in enumerate(rows):
+        row["rank"] = i + 1
+    return {"top": rows[:top_n], "bottom": rows[-top_n:], "total": len(rows)}
 
 
 # ── 3.8 全市场龙虎榜 (东财 datacenter) ──
