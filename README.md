@@ -31,7 +31,7 @@ An orchestrator command paired with model-pinned subagents for running a session
 
 | File | Description |
 |------|-------------|
-| [fable](commands/fable.md) | `/fable` — puts the session in orchestrator mode: the main model only plans, dispatches, adjudicates, and synthesizes. Routes reasoning-heavy work to `deep-reasoner`, mechanical work to `fast-worker`, and requires independent verification by `verifier` before anything ships. |
+| [fable](commands/fable.md) | `/fable` — puts the session in orchestrator mode: the main model only plans, dispatches, adjudicates, and synthesizes. Work is routed by role (`deep-reasoner` / `fast-worker` / `verifier` / `Explore`) and scaled by model tier via the Agent `model` override; nontrivial changes get independent verification by `verifier`, with intensity scaled to risk. |
 | [deep-reasoner](agents/deep-reasoner.md) | Pinned to Opus at `xhigh` effort. Architecture design, complex-bug root-cause analysis, algorithm design, trade-off analysis. |
 | [fast-worker](agents/fast-worker.md) | Pinned to Sonnet at `medium` effort. Boilerplate, well-specified changes, running tests/lint/build, batch operations. |
 | [verifier](agents/verifier.md) | Pinned to Sonnet at `high` effort (pass `model: opus` for critical changes). Falsification-oriented: re-runs tests and checks each acceptance criterion with fresh context rather than trusting the implementer's self-report. |
