@@ -32,6 +32,7 @@ An orchestrator command paired with model-pinned subagents for running a session
 | File | Description |
 |------|-------------|
 | [fable](commands/fable.md) | `/fable` — puts the session in orchestrator mode: the main model only plans, dispatches, adjudicates, and synthesizes. Work is routed by role (`deep-reasoner` / `fast-worker` / `verifier` / `Explore`) and scaled by model tier via the Agent `model` override; nontrivial changes get independent verification by `verifier`, with intensity scaled to risk. |
+| [handoff](commands/handoff.md) | `/handoff` — distills the current session into a self-contained handoff document (`handoff-YYYY-MM-DD-<slug>.md` in the working directory): task state, key trade-off decisions at full fidelity, background constraints, and next steps, so a fresh session or agent can pick up the work without re-asking. Sources from the conversation context only — no investigation to fill gaps. |
 | [deep-reasoner](agents/deep-reasoner.md) | Pinned to Opus at `xhigh` effort. Architecture design, complex-bug root-cause analysis, algorithm design, trade-off analysis. |
 | [fast-worker](agents/fast-worker.md) | Pinned to Sonnet at `medium` effort. Boilerplate, well-specified changes, running tests/lint/build, batch operations. |
 | [verifier](agents/verifier.md) | Pinned to Sonnet at `high` effort (pass `model: opus` for critical changes). Falsification-oriented: re-runs tests and checks each acceptance criterion with fresh context rather than trusting the implementer's self-report. |
