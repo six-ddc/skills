@@ -21,8 +21,8 @@ They're also portable via [six-ddc/codex-dynamic-workflows](https://github.com/s
 
 | Workflow | Description |
 |----------|-------------|
-| [code-review-extracted](workflows/code-review-extracted.js) | Workflow-backed code review — one finder agent per review angle, an independent verifier for every candidate, then a ranked, capped findings report. Launched by the `/code-review` skill at high / xhigh / max effort. |
-| [deep-research-extracted](workflows/deep-research-extracted.js) | Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, and synthesize a cited report. |
+| [code-review-extracted](workflows/code-review-extracted.js) | Workflow-backed code review — one finder per correctness angle plus one finder covering all cleanup angles (reuse / simplification / efficiency / altitude / CLAUDE.md conventions), an independent verifier per distinct (file, line) location across the pooled candidates, then an index-based synthesis into a ranked, capped findings report. The `/code-review` high / xhigh / max engine. Extracted verbatim from the Claude Code binary (v2.1.221), with the build-time constant interpolations resolved inline. |
+| [deep-research-extracted](workflows/deep-research-extracted.js) | Deep research harness — fan-out web searches, fetch sources, adversarially verify claims (3-vote panels; infra failures reported as *unverified*, never as refuted), and synthesize a cited report. Extracted verbatim from the Claude Code binary (v2.1.221). |
 
 ## Commands & Agents
 
